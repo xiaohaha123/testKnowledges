@@ -59,7 +59,7 @@ VARIETIES = [
     ("RU0", "橡胶"),
     ("FU0", "燃料油"),
     ("SC0", "原油"),
-    ("LPG0", "液化石油气"),
+    # ("LPG0", "液化石油气"),  # Sina无数据, DCE直连被456/412封锁, 暂不可用
     ("LU0", "低硫燃料油"),
     ("SP0", "纸浆"),
     ("UR0", "尿素"),
@@ -276,6 +276,17 @@ def safe_sheet_name(name: str) -> str:
     return name[:31]
 
 
+def find_latest_summary(ext: str) -> str | None:
+    """找到最近的汇总文件(按文件名日期后缀降序), 返回完整路径或 None。"""
+    prefix = "futures_main_daily_"
+    files = [f for f in os.listdir(OUTPUT_DIR)
+             if f.startswith(prefix) and f.endswith(f".{ext}")]
+    if not files:
+        return None
+    files.sort(reverse=True)
+    return os.path.join(OUTPUT_DIR, files[0])
+
+
 def load_existing_df(csv_path: str):
     """读取已有 CSV, 返回 (DataFrame, [合约代码...], 最新日期'YYYY-MM-DD') 或 None。"""
     if not os.path.exists(csv_path):
@@ -402,16 +413,48 @@ def main():
         time.sleep(SLEEP_BETWEEN)
 
     if frames:
+        is_partial = len(sys.argv) > 1
         xlsx_path = os.path.join(OUTPUT_DIR, f"futures_main_daily_{today}.xlsx")
-        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-            for tag, df in frames.items():
-                df.to_excel(writer, sheet_name=safe_sheet_name(tag), index=False)
-        print(f"\n汇总 Excel : {xlsx_path}")
-
-        big = pd.concat(frames.values(), ignore_index=True)
         big_csv = os.path.join(OUTPUT_DIR, f"futures_main_daily_{today}.csv")
-        big.to_csv(big_csv, index=False, encoding="utf-8-sig")
-        print(f"汇总 CSV  : {big_csv}  ({len(big)} 行)")
+
+        if is_partial:
+            # 部分抓取: 合并到已有汇总(找最近的, 跨日期也能合并), 只替换目标品种
+            target_codes = [code for code, _ in target]
+            old_csv = find_latest_summary("csv")
+            if old_csv:
+                try:
+                    old_big = pd.read_csv(old_csv, encoding="utf-8-sig")
+                    old_big = old_big[~old_big["品种代码"].astype(str).isin(target_codes)]
+                    big = pd.concat([old_big] + list(frames.values()), ignore_index=True, sort=False)
+                except Exception:
+                    big = pd.concat(frames.values(), ignore_index=True, sort=False)
+            else:
+                big = pd.concat(frames.values(), ignore_index=True, sort=False)
+            big = big.sort_values(["品种代码", "日期"], kind="mergesort").reset_index(drop=True)
+            big.to_csv(big_csv, index=False, encoding="utf-8-sig")
+            print(f"\n汇总 CSV  : {big_csv}  ({len(big)} 行, 已合并 {len(target)} 个品种)")
+
+            old_xlsx = find_latest_summary("xlsx")
+            sheets = {}
+            if old_xlsx:
+                try:
+                    sheets = pd.read_excel(old_xlsx, sheet_name=None)
+                except Exception:
+                    pass
+            sheets.update({safe_sheet_name(tag): df for tag, df in frames.items()})
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+                for sn, df in sheets.items():
+                    df.to_excel(writer, sheet_name=sn, index=False)
+            print(f"汇总 Excel : {xlsx_path}  (已合并 {len(sheets)} 个 sheet)")
+        else:
+            # 全量抓取: 直接覆盖
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+                for tag, df in frames.items():
+                    df.to_excel(writer, sheet_name=safe_sheet_name(tag), index=False)
+            print(f"\n汇总 Excel : {xlsx_path}")
+            big = pd.concat(frames.values(), ignore_index=True, sort=False)
+            big.to_csv(big_csv, index=False, encoding="utf-8-sig")
+            print(f"汇总 CSV  : {big_csv}  ({len(big)} 行)")
 
     print(f"\n完成: 成功 {len(success)} / 失败 {len(failed)}")
     if failed:

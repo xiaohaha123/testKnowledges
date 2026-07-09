@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-期货K线形态分析报告生成器
-==========================
-读取 get_price.py 输出的汇总长表 CSV(含全部品种), 对每个品种在
-**最新一根K线**完成的所有形态进行识别(规则对照 patterns.md), 输出
-Markdown 报告: 开头给出各形态量化描述; 各品种列出命中的方向形态
-(看多/看空参考); 中性及无形态品种不输出。同时为每个方向形态生成
-带形态高亮+信号箭头的K线图(输出到 image_<日期>/ 目录)。
+期货K线形态分析报告生成器(单品种, 全量扫描)
+================================================
+读取 get_price.py 输出的**单品种 CSV**(如 output/MA0_甲醇.csv), 对
+**全部K线逐根**扫描所有形态(规则对照 summary.md), 输出 Markdown 报告:
+- 最新K线: 命中的方向形态(看多/看空), 带高亮+信号箭头K线图
+- 历史形态: 全部历史方向命中(按日期降序表), 最近15个带图表(含后续走势)
+中性(十字星/纺锤)不输出方向。
+
+本文件同时是形态识别核心库: pattern_fullscan.py 通过 `from pattern_report
+import PATTERNS, tick_of, ...` 引用其中的形态函数。
 
 用法:
-  python pattern_report.py <数据文件.csv>
+  python pattern_report.py <单品种CSV>
 例:
-  python pattern_report.py output/futures_main_daily_20260706.csv
+  python pattern_report.py output/MA0_甲醇.csv
 """
 
 import os
@@ -24,10 +27,14 @@ try:
 except ImportError as e:
     sys.exit(f"缺少依赖: {e.name}\n请运行: pip install pandas")
 
+# ---------- 输出目录(与 get_price 的 output/ 分开) ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PATTERN_OUTPUT_DIR = os.path.join(BASE_DIR, "pattern_output")
+
 # ---------- 合约最小变动价位(按品种基础代码; 仅供参考, 如有变动请更正) ----------
 TICK = {
     # 黑色
-    "RB": 1, "HC": 1, "I": 0.5, "J": 0.5, "JM": 0.5, "ZC": 0.2,
+    "RB": 1, "HC": 1, "I": 0.5, "J": 0.5, "JM": 0.5,
     # 化工
     "MA": 1, "TA": 2, "PP": 1, "V": 1, "EG": 1, "SA": 1, "FG": 1, "L": 1,
     "BU": 2, "RU": 5, "FU": 1, "SC": 0.1, "LPG": 1, "LU": 1, "SP": 2, "UR": 1,
@@ -38,18 +45,19 @@ TICK = {
     # 农产品
     "C": 1, "CS": 1, "M": 1, "Y": 2, "P": 2, "A": 1, "B": 1, "SR": 1, "CF": 5, "CY": 5,
     "OI": 1, "RM": 1, "AP": 1, "CJ": 5, "JD": 1, "PK": 2, "LH": 5,
-    # 金融
-    "IF": 0.2, "IC": 0.2, "IH": 0.2,
 }
 
 TREND_N = 5       # 趋势判定回看根数
 IMG_BARS = 60     # 图表展示的最近K线根数
 ATR_N = 14        # ATR 计算周期
 BIG_K = 1.3       # "大K线"量级阈值: 当日/形态K区间 ≥ BIG_K × ATR(ATR_N)
+HIST_CHART_MAX = 15   # 历史形态最多生成图表数(取最近N个, 避免过多)
+HIST_CONTEXT_BEFORE = 30  # 历史信号图表: 信号日前展示根数
+HIST_CONTEXT_AFTER = 10   # 历史信号图表: 信号日后展示根数
 
 
 def base_code(code: str) -> str:
-    """RB0 -> RB, I0 -> I, IF0 -> IF"""
+    """RB0 -> RB, I0 -> I, SC0 -> SC"""
     return code[:-1] if code.endswith("0") and len(code) > 1 else code
 
 
@@ -515,6 +523,24 @@ def analyze(df):
     return out, i
 
 
+def analyze_all(df):
+    """对 df(单品种, 按日期升序) 逐根做全形态扫描, 返回 [(bar_idx, match_dict), ...]。"""
+    df = df.sort_values("日期").reset_index(drop=True)
+    n = len(df)
+    if n == 0:
+        return []
+    out = []
+    for i in range(1, n):
+        for _, fn in PATTERNS:
+            try:
+                ms = fn(df, i)
+            except Exception:
+                continue
+            for m in ms:
+                out.append((i, m))
+    return out
+
+
 def pattern_bars(name):
     """形态占用的K线根数(用于图表高亮区间)。"""
     if name in ("上升三法", "下跌三法"):
@@ -528,8 +554,10 @@ def pattern_bars(name):
     return 1
 
 
-def draw_chart(grp, idx, m, code, name, contract, date_str, out_dir):
-    """为单个形态生成带标识的K线图(形态高亮+信号箭头), 返回图片路径或 None。"""
+def draw_chart(df, sig_idx, m, code, name, contract, date_str, out_dir, is_latest=True):
+    """为单个形态生成带标识的K线图(形态高亮+信号箭头), 返回图片路径或 None。
+    sig_idx: 信号日在 df 中的行索引
+    is_latest: True=信号在末尾(显示最近IMG_BARS根); False=历史信号(窗口居中, 含后续走势)"""
     try:
         import mplfinance as mpf
         import matplotlib
@@ -541,15 +569,19 @@ def draw_chart(grp, idx, m, code, name, contract, date_str, out_dir):
         return None
 
     d = m["direction"]
-    n = len(grp)
-    start = max(0, n - IMG_BARS)
-    pdf = grp.iloc[start:].copy()
+    n = len(df)
+    if is_latest:
+        start = max(0, n - IMG_BARS)
+        end = n
+    else:
+        start = max(0, sig_idx - HIST_CONTEXT_BEFORE)
+        end = min(n, sig_idx + HIST_CONTEXT_AFTER + 1)
+    pdf = df.iloc[start:end].copy()
     pdf["日期"] = pd.to_datetime(pdf["日期"])
     pdf = pdf.set_index("日期")[["开盘价", "最高价", "最低价", "收盘价", "成交量"]]
     pdf.columns = ["Open", "High", "Low", "Close", "Volume"]
     pdf = pdf.astype(float)
-    M = len(pdf)
-    sig_i = M - 1
+    sig_pos = sig_idx - start
 
     mc = mpf.make_marketcolors(up="#d32f2f", down="#2e7d32",
                                edge="inherit", wick="inherit", volume="inherit")
@@ -559,10 +591,10 @@ def draw_chart(grp, idx, m, code, name, contract, date_str, out_dir):
     # 信号日箭头标记: 多头红色上箭头(LOW下方), 空头绿色下箭头(HIGH上方)
     mark = pd.Series(index=pdf.index, dtype=float)
     if d == "多":
-        mark.iloc[-1] = pdf["Low"].iloc[-1] * 0.985
+        mark.iloc[sig_pos] = pdf["Low"].iloc[sig_pos] * 0.985
         sym, col = "^", "#b71c1c"
     else:
-        mark.iloc[-1] = pdf["High"].iloc[-1] * 1.015
+        mark.iloc[sig_pos] = pdf["High"].iloc[sig_pos] * 1.015
         sym, col = "v", "#1b5e20"
     aps = [mpf.make_addplot(mark, type="scatter", marker=sym, markersize=130, color=col)]
 
@@ -573,11 +605,14 @@ def draw_chart(grp, idx, m, code, name, contract, date_str, out_dir):
 
     # 形态K线高亮带(橙色淡底)
     K = pattern_bars(m["name"])
-    ax.axvspan(max(0, sig_i - K + 1) - 0.4, sig_i + 0.4, alpha=0.20, color="#ff9800")
+    ax.axvspan(max(0, sig_pos - K + 1) - 0.4, sig_pos + 0.4, alpha=0.20, color="#ff9800")
 
     os.makedirs(out_dir, exist_ok=True)
     safe = m["name"].replace("/", "_").replace("\\", "_")
-    fpath = os.path.join(out_dir, f"{code}_{safe}.png")
+    if is_latest:
+        fpath = os.path.join(out_dir, f"{code}_{safe}.png")
+    else:
+        fpath = os.path.join(out_dir, f"{code}_{safe}_{date_str.replace('-', '')}.png")
     fig.savefig(fpath, dpi=100)
     plt.close(fig)
     return fpath
@@ -585,7 +620,7 @@ def draw_chart(grp, idx, m, code, name, contract, date_str, out_dir):
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("用法: python pattern_report.py <数据文件.csv>")
+        sys.exit("用法: python pattern_report.py <单品种CSV>")
     path = sys.argv[1]
     if not os.path.isabs(path):
         path = os.path.abspath(path)
@@ -599,20 +634,51 @@ def main():
     if miss:
         sys.exit(f"CSV 缺列: {miss}")
 
-    latest = str(df["日期"].max())
+    df = df.sort_values("日期").reset_index(drop=True)
+    if len(df) == 0:
+        sys.exit("CSV 无数据")
+
+    code = df.iloc[0]["品种代码"]
+    name = df.iloc[0]["品种名称"]
+    contract = df.iloc[0]["合约代码"]
+    tick = tick_of(code)
+    latest = str(df["日期"].iloc[-1])
     latest_tag = latest.replace("-", "")
-    img_dir = os.path.join(os.path.dirname(path), f"image_{latest_tag}")
+    close = float(df.iloc[-1]["收盘价"])
+    start = str(df["日期"].iloc[0])
+    os.makedirs(PATTERN_OUTPUT_DIR, exist_ok=True)
+    img_dir = os.path.join(PATTERN_OUTPUT_DIR, f"image_{latest_tag}")
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    n = len(df)
+
+    # 全量扫描: 逐根识别所有形态
+    all_hits = analyze_all(df)
+    # 按是否最新K线拆分, 只保留方向形态(多/空)
+    latest_dhits = [(i, m) for i, m in all_hits if i == n - 1
+                    and m["direction"] in ("多", "空")]
+    hist_dhits = [(i, m) for i, m in all_hits if i < n - 1
+                  and m["direction"] in ("多", "空")]
+    # 历史命中按日期降序(最近优先)
+    hist_dhits.sort(key=lambda x: x[0], reverse=True)
+
+    latest_bias = None
+    if latest_dhits:
+        dirs = [m["direction"] for _, m in latest_dhits]
+        latest_bias = "多" if dirs.count("多") >= dirs.count("空") else "空"
+
+    hist_multi = sum(1 for _, m in hist_dhits if m["direction"] == "多")
+    hist_short = sum(1 for _, m in hist_dhits if m["direction"] == "空")
 
     lines = []
-    lines.append("# 期货K线形态分析报告")
+    lines.append(f"# {code} {name} K线形态分析报告")
     lines.append("")
-    lines.append(f"- 数据文件: `{path}`")
+    lines.append(f"- 数据文件: `{os.path.basename(path)}`")
     lines.append(f"- 生成时间: {now}")
-    lines.append(f"- 数据最新日期: {latest}")
-    lines.append("- 识别范围: 在**最新一根K线**完成的形态(对照 `形态.md`)")
-    lines.append("- 输出范围: 仅列方向明确(看多/看空)的形态; 中性(十字星/纺锤)及无形态品种不输出")
-    lines.append(f"- 形态图: 见 `image_{latest_tag}/` 目录(高亮形态K线+信号箭头), 详情内嵌")
+    lines.append(f"- 合约: {contract}　最小变动价位: {tick}")
+    lines.append(f"- 数据范围: {start} ~ {latest}　共 {n} 根")
+    lines.append("- 识别范围: **全部K线逐根扫描**(对照 `summary.md`)")
+    lines.append("- 输出范围: 仅列方向明确(看多/看空)的形态; 中性(十字星/纺锤)不输出")
+    lines.append(f"- 形态图: 见 `image_{latest_tag}/` 目录(高亮形态K线+信号箭头)")
     lines.append("")
     lines.append("## 形态量化描述")
     lines.append("")
@@ -621,66 +687,83 @@ def main():
     for nm, dr, qc in PATTERN_DESC:
         lines.append(f"| {nm} | {dr} | {qc} |")
     lines.append("")
-    lines.append("## 汇总")
+
+    # ---- 最新K线分析 ----
+    lines.append("## 最新K线分析")
     lines.append("")
-    lines.append("| 品种 | 名称 | 合约 | 最新日期 | 收盘 | 方向 | 命中形态 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append(f"- 日期: **{latest}**　收盘: **{fmt(close, tick)}**")
+    if not latest_dhits:
+        lines.append("- 命中: 无方向形态(中性或无形态)")
+    else:
+        names = "、".join(m["name"] for _, m in latest_dhits)
+        lines.append(f"- 命中形态: {names}")
+        lines.append(f"- 主方向: **{latest_bias}**")
+    lines.append("")
 
-    detail = []
-    summary_rows = []
-    n_total = df["品种代码"].nunique()
-    for code, grp in df.groupby("品种代码", sort=False):
-        grp = grp.sort_values("日期").reset_index(drop=True)
-        if len(grp) == 0:
-            continue
-        r = grp.iloc[-1]
-        name = r["品种名称"]; contract = r["合约代码"]; d = str(r["日期"])
-        close = float(r["收盘价"]); tick = tick_of(code)
-        matches, idx = analyze(grp)
-        dmatches = [m for m in matches if m["direction"] in ("多", "空")]
-        if not dmatches:
-            continue  # 中性/无形态: 不输出
-        dirs = [m["direction"] for m in dmatches]
-        bias = "多" if dirs.count("多") >= dirs.count("空") else "空"
-        names = "、".join(m["name"] for m in dmatches)
-        summary_rows.append((code, name, contract, d, fmt(close, tick), bias, names))
-
-        sec = []
-        sec.append(f"## {code} {name}（合约 {contract}）")
-        sec.append(f"- 最新日期: {d}　收盘: **{fmt(close, tick)}**　主方向: **{bias}**")
-        sec.append("")
-        sec.append("| 形态 | 方向 | 说明 |")
-        sec.append("| --- | --- | --- |")
+    if latest_dhits:
+        lines.append("| 形态 | 方向 | 说明 |")
+        lines.append("| --- | --- | --- |")
         img_lines = []
-        for m in dmatches:
-            sec.append(f"| {m['name']} | {m['direction']} | {m['note']} |")
-            fpath = draw_chart(grp, idx, m, code, name, contract, d, img_dir)
+        for _, m in latest_dhits:
+            lines.append(f"| {m['name']} | {m['direction']} | {m['note']} |")
+            fpath = draw_chart(df, n - 1, m, code, name, contract, latest, img_dir,
+                               is_latest=True)
             if fpath:
-                rel = os.path.relpath(fpath, os.path.dirname(path)).replace("\\", "/")
+                rel = os.path.relpath(fpath, PATTERN_OUTPUT_DIR).replace("\\", "/")
                 img_lines.append(f"![{m['name']}]({rel})")
-        sec.append("")
+        lines.append("")
         for il in img_lines:
-            sec.append(il)
-        sec.append("")
-        detail.append("\n".join(sec))
+            lines.append(il)
+        lines.append("")
 
-    for row in summary_rows:
-        lines.append("| " + " | ".join(str(x) for x in row) + " |")
+    # ---- 历史形态回顾 ----
+    lines.append("## 历史形态回顾")
     lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.append("## 各品种详情")
-    lines.append("")
-    lines.append("\n\n".join(detail))
+    if not hist_dhits:
+        lines.append("历史K线无方向形态命中。")
+        lines.append("")
+    else:
+        lines.append(f"- 共 **{len(hist_dhits)}** 处方向形态命中 "
+                      f"(多 {hist_multi} / 空 {hist_short})")
+        lines.append(f"- 下表按日期降序列出全部命中; 图表取最近 {HIST_CHART_MAX} 个")
+        lines.append("")
+        lines.append("| 日期 | 形态 | 方向 | 说明 |")
+        lines.append("| --- | --- | --- | --- |")
+        for i, m in hist_dhits:
+            d = str(df["日期"].iloc[i])
+            lines.append(f"| {d} | {m['name']} | {m['direction']} | {m['note']} |")
+        lines.append("")
 
-    out_name = f"形态分析报告_{latest.replace('-', '')}.md"
-    out_path = os.path.join(os.path.dirname(path), out_name)
+        # 最近 HIST_CHART_MAX 个历史形态图表
+        chart_hits = hist_dhits[:HIST_CHART_MAX]
+        if chart_hits:
+            lines.append(f"### 近期历史形态图 (最近 {len(chart_hits)} 个)")
+            lines.append("")
+            for i, m in chart_hits:
+                d = str(df["日期"].iloc[i])
+                fpath = draw_chart(df, i, m, code, name, contract, d, img_dir,
+                                   is_latest=False)
+                if fpath:
+                    rel = os.path.relpath(fpath, PATTERN_OUTPUT_DIR).replace("\\", "/")
+                    lines.append(f"![{m['name']} {d}]({rel})")
+                    lines.append("")
+            lines.append("")
+
+    out_name = f"形态分析报告_{code}_{name}_{latest_tag}.md"
+    out_path = os.path.join(PATTERN_OUTPUT_DIR, out_name)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print(f"已生成: {out_path}")
-    print(f"总品种数: {n_total}  方向品种(多/空): {len(summary_rows)}  "
-          f"(已过滤中性/无形态)")
-    print(f"形态图目录: {img_dir}")
+
+    print(f"品种: {code} {name}  合约: {contract}  最新: {latest}  收盘: {fmt(close, tick)}")
+    if latest_dhits:
+        names = "、".join(m["name"] for _, m in latest_dhits)
+        print(f"最新命中: {len(latest_dhits)} 个  主方向: {latest_bias}  ({names})")
+    else:
+        print("最新命中: 无方向形态")
+    print(f"历史命中: {len(hist_dhits)} 处  (多{hist_multi}/空{hist_short})  "
+          f"图表: {min(len(hist_dhits), HIST_CHART_MAX)} 张")
+    print(f"报告: {out_path}")
+    print(f"形态图: {img_dir}")
 
 
 if __name__ == "__main__":
