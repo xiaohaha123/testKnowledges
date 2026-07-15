@@ -2,13 +2,14 @@
 """
 最新K线形态扫描(多品种批量, 单文件输出)
 ========================================
-读取 get_price.py 输出的**汇总长表 CSV**(含全部品种), 对每个品种
+读取 get_price.py 输出的**汇总 CSV**(8列 MetaStock ASCII, 含全部品种), 对每个品种
 仅扫描**最新一根K线**完成的形态(对照 summary.md), 列出全部命中
 形态(多/空/中性)。
 输出: 1 份 fullscan_index.md(含全部品种汇总表 + 命中品种详情+图表)。
 无命中品种不生成图表。
 图例: 多标于当日低点下方(^红), 空标于当日高点上方(v绿), 中性标低点下方(o灰)。
 用法: python pattern_fullscan.py output/futures_main_daily_20260708.csv
+(8列 MetaStock ASCII 格式, 无表头)
 """
 
 import os
@@ -18,7 +19,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from pattern_report import tick_of, analyze, IMG_BARS, fmt
+from pattern_report import tick_of, analyze, IMG_BARS, fmt, load_metastock_csv
 
 # ---------- 输出目录(与 get_price 的 output/ 分开) ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -103,12 +104,7 @@ def main():
     if not os.path.exists(path):
         sys.exit(f"文件不存在: {path}")
 
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    need = ["品种代码", "品种名称", "合约代码", "日期", "开盘价", "最高价",
-            "最低价", "收盘价", "成交量", "持仓量"]
-    miss = [c for c in need if c not in df.columns]
-    if miss:
-        sys.exit(f"CSV 缺列: {miss}")
+    df = load_metastock_csv(path)
 
     out_dir = os.path.join(PATTERN_OUTPUT_DIR, "fullscan")
     os.makedirs(out_dir, exist_ok=True)

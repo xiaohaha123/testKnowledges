@@ -2,7 +2,7 @@
 """
 期货K线形态分析报告生成器(单品种, 全量扫描)
 ================================================
-读取 get_price.py 输出的**单品种 CSV**(如 output/MA0_甲醇.csv), 对
+读取 get_price.py 输出的**单品种 CSV**(如 output/MA0.csv, 7列 MetaStock ASCII 格式), 对
 **全部K线逐根**扫描所有形态(规则对照 summary.md), 输出 Markdown 报告:
 - 最新K线: 命中的方向形态(看多/看空), 带高亮+信号箭头K线图
 - 历史形态: 全部历史方向命中(按日期降序表), 最近15个带图表(含后续走势)
@@ -14,7 +14,8 @@ import PATTERNS, tick_of, ...` 引用其中的形态函数。
 用法:
   python pattern_report.py <单品种CSV>
 例:
-  python pattern_report.py output/MA0_甲醇.csv
+  python pattern_report.py output/MA0.csv
+(7列 MetaStock ASCII 格式, 无表头)
 """
 
 import os
@@ -26,6 +27,8 @@ try:
     import pandas as pd
 except ImportError as e:
     sys.exit(f"缺少依赖: {e.name}\n请运行: pip install pandas")
+
+from get_price import VARIETIES
 
 # ---------- 输出目录(与 get_price 的 output/ 分开) ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -81,6 +84,25 @@ def fmt(price, tick):
         return str(int(round(p)))
     dec = max(0, len(str(tick).split(".")[-1]))
     return f"{p:.{dec}f}"
+
+
+def load_metastock_csv(path):
+    """读取 8列 MetaStock ASCII CSV(无表头), 返回带中文列名的 DataFrame。
+    格式: 品种代码,D,YYMMDD,开,高,低,收,成交量"""
+    df = pd.read_csv(path, header=None, encoding="utf-8-sig",
+                     usecols=[0, 2, 3, 4, 5, 6, 7],
+                     names=["品种代码", "日期", "开盘价", "最高价",
+                            "最低价", "收盘价", "成交量"])
+    d = df["日期"].astype(str)
+    df["日期"] = d.str[:4] + "-" + d.str[4:6] + "-" + d.str[6:8]
+    name_dict = dict(VARIETIES)
+    for code, grp in df.groupby("品种代码"):
+        df.loc[grp.index, "品种名称"] = name_dict.get(code, code)
+    df["合约代码"] = ""
+    df["持仓量"] = 0
+    for c in ["开盘价", "最高价", "最低价", "收盘价", "成交量", "持仓量"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 
 def bar(df, i):
@@ -627,12 +649,7 @@ def main():
     if not os.path.exists(path):
         sys.exit(f"文件不存在: {path}")
 
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    need = ["品种代码", "品种名称", "合约代码", "日期", "开盘价", "最高价",
-            "最低价", "收盘价", "成交量", "持仓量"]
-    miss = [c for c in need if c not in df.columns]
-    if miss:
-        sys.exit(f"CSV 缺列: {miss}")
+    df = load_metastock_csv(path)
 
     df = df.sort_values("日期").reset_index(drop=True)
     if len(df) == 0:

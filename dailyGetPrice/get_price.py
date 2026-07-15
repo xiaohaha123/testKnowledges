@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 """
 获取国内主要活跃期货品种主力合约的历史日线数据
-=================================================
+================================================
 数据源  : akshare -> 新浪财经 (https://qhsz.huotaobi.cn / 新浪期货行情)
 接口    : ak.futures_main_sina(symbol="<合约代码>")
 例子    : RB2609 = 螺纹钢 2026年09月合约
 说明    : 不再使用连续主力合约，而是抓取当前最活跃的单一期货主力合约月份。
           对每个品种会自动选择最新成交量/持仓量最大的合约月份，例如豆一会选2609，沪金会选2608。
-列字段  : 品种代码 / 品种名称 / 合约代码 / 日期 / 开盘价 / 最高价 / 最低价 / 收盘价 / 成交量 / 持仓量
+列字段  : 品种代码 / D(市场) / 日期(YYYYMMDD) / 开盘价 / 最高价 / 最低价 / 收盘价 / 成交量
 
 输出 (运行后在同目录 output/ 下):
-  1) 每个品种一个 CSV   : <代码>_<中文名>.csv
-  2) 汇总 Excel (多sheet): futures_main_daily_<日期>.xlsx
-  3) 汇总 CSV (长表)     : futures_main_daily_<日期>.csv
+  1) 每个品种一个 CSV   : <代码>.csv  (MetaStock ASCII 8列, 无表头)
+  2) 汇总 CSV           : futures_main_daily_<日期>.csv (8列, 无表头)
+  3) 汇总 Excel (多sheet): futures_main_daily_<日期>.xlsx
 
 用法:
   python get_price.py            # 抓取全部品种
@@ -287,20 +287,54 @@ def find_latest_summary(ext: str) -> str | None:
     return os.path.join(OUTPUT_DIR, files[0])
 
 
-def load_existing_df(csv_path: str):
-    """读取已有 CSV, 返回 (DataFrame, [合约代码...], 最新日期'YYYY-MM-DD') 或 None。"""
+def write_metastock_csv(df, path):
+    """将 DataFrame 写入 8列 MetaStock ASCII CSV(无表头)。
+    格式: 品种代码,D,YYYYMMDD,开,高,低,收,成交量"""
+    with open(path, "w", encoding="utf-8") as f:
+        for _, row in df.iterrows():
+            code = str(row["品种代码"])
+            d = str(row["日期"]).replace("-", "")
+            o = str(float(row["开盘价"])) if pd.notna(row["开盘价"]) else ""
+            h = str(float(row["最高价"])) if pd.notna(row["最高价"]) else ""
+            lo = str(float(row["最低价"])) if pd.notna(row["最低价"]) else ""
+            c = str(float(row["收盘价"])) if pd.notna(row["收盘价"]) else ""
+            v = str(int(float(row["成交量"]))) if pd.notna(row["成交量"]) else ""
+            f.write(f"{code},D,{d},{o},{h},{lo},{c},{v}\n")
+
+
+def load_metastock_df(csv_path: str):
+    """读取 8列 MetaStock ASCII CSV(无表头), 返回带中文列名的 DataFrame 或 None。
+    格式: 品种代码,D,YYMMDD,开,高,低,收,成交量"""
     if not os.path.exists(csv_path):
         return None
     try:
-        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        df = pd.read_csv(csv_path, header=None, encoding="utf-8-sig",
+                         usecols=[0, 2, 3, 4, 5, 6, 7],
+                         names=["品种代码", "日期", "开盘价", "最高价",
+                                "最低价", "收盘价", "成交量"])
     except Exception:
         return None
-    if df is None or len(df) == 0 or "日期" not in df.columns:
+    if df is None or len(df) == 0:
         return None
-    contracts = (list(dict.fromkeys(df["合约代码"].astype(str)))
-                 if "合约代码" in df.columns else [])
+    d = df["日期"].astype(str)
+    df["日期"] = d.str[:4] + "-" + d.str[4:6] + "-" + d.str[6:8]
+    name_dict = dict(VARIETIES)
+    for code, grp in df.groupby("品种代码"):
+        df.loc[grp.index, "品种名称"] = name_dict.get(code, code)
+    df["合约代码"] = ""
+    df["持仓量"] = 0
+    for c in ["开盘价", "最高价", "最低价", "收盘价", "成交量", "持仓量"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def load_existing_df(csv_path: str):
+    """读取已有 7列 MetaStock CSV, 返回 (DataFrame, [], 最新日期'YYYY-MM-DD') 或 None。"""
+    df = load_metastock_df(csv_path)
+    if df is None:
+        return None
     latest = pd.to_datetime(df["日期"]).max().strftime("%Y-%m-%d")
-    return df, contracts, latest
+    return df, [], latest
 
 
 def probe_latest_date(contract_code: str):
@@ -338,7 +372,7 @@ def main():
 
     for idx, (code, name) in enumerate(target, 1):
         tag = f"{code} {name}"
-        csv_path = os.path.join(OUTPUT_DIR, f"{code}_{name}.csv")
+        csv_path = os.path.join(OUTPUT_DIR, f"{code}.csv")
         print(f"[{idx}/{len(target)}] {tag} 抓取中...", end=" ", flush=True)
 
         # 增量更新: 已有 CSV 且数据源无新增数据则跳过, 直接复用旧数据进汇总
@@ -385,20 +419,18 @@ def main():
 
             combined = pd.concat(pieces, ignore_index=True, sort=False)
             combined = combined.sort_values(["日期", "合约代码"], kind="mergesort").reset_index(drop=True)
-            csv_path = os.path.join(OUTPUT_DIR, f"{code}_{name}.csv")
-            # 同合约则与旧CSV合并(备用源只回近180天, 合并保留旧历史); 换月则覆盖
-            if os.path.exists(csv_path):
-                try:
-                    old = pd.read_csv(csv_path, encoding="utf-8-sig")
-                except Exception:
-                    old = None
-                if old is not None and len(old) > 0 and "合约代码" in old.columns \
-                        and str(old["合约代码"].iloc[0]) == str(combined["合约代码"].iloc[0]):
-                    combined = pd.concat([old, combined], ignore_index=True, sort=False)
-                    combined = combined.drop_duplicates(subset=["日期"], keep="last")
-                    combined = combined.sort_values(["日期", "合约代码"], kind="mergesort").reset_index(drop=True)
-            combined.to_csv(csv_path, index=False, encoding="utf-8-sig")
+            csv_path = os.path.join(OUTPUT_DIR, f"{code}.csv")
+            # 与旧CSV合并(备用源只回近180天, 合并保留旧历史)
+            old = load_metastock_df(csv_path)
+            if old is not None and len(old) > 0:
+                combined = pd.concat([old, combined], ignore_index=True, sort=False)
+                combined = combined.drop_duplicates(subset=["日期"], keep="last")
+                combined = combined.sort_values(["日期"], kind="mergesort").reset_index(drop=True)
+
+            # 写入 7列 MetaStock ASCII CSV(无表头)
+            write_metastock_csv(combined, csv_path)
             print(f"OK  {len(combined)} 行  日期 {combined['日期'].iloc[0]}~{combined['日期'].iloc[-1]}  合约 {', '.join(contract_codes)} -> {os.path.basename(csv_path)}")
+
             frames[tag] = combined
             success.append(tag)
             consec_fail = 0
@@ -423,15 +455,18 @@ def main():
             old_csv = find_latest_summary("csv")
             if old_csv:
                 try:
-                    old_big = pd.read_csv(old_csv, encoding="utf-8-sig")
-                    old_big = old_big[~old_big["品种代码"].astype(str).isin(target_codes)]
-                    big = pd.concat([old_big] + list(frames.values()), ignore_index=True, sort=False)
+                    old_big = load_metastock_df(old_csv)
+                    if old_big is not None:
+                        old_big = old_big[~old_big["品种代码"].astype(str).isin(target_codes)]
+                        big = pd.concat([old_big] + list(frames.values()), ignore_index=True, sort=False)
+                    else:
+                        big = pd.concat(frames.values(), ignore_index=True, sort=False)
                 except Exception:
                     big = pd.concat(frames.values(), ignore_index=True, sort=False)
             else:
                 big = pd.concat(frames.values(), ignore_index=True, sort=False)
             big = big.sort_values(["品种代码", "日期"], kind="mergesort").reset_index(drop=True)
-            big.to_csv(big_csv, index=False, encoding="utf-8-sig")
+            write_metastock_csv(big, big_csv)
             print(f"\n汇总 CSV  : {big_csv}  ({len(big)} 行, 已合并 {len(target)} 个品种)")
 
             old_xlsx = find_latest_summary("xlsx")
@@ -453,7 +488,7 @@ def main():
                     df.to_excel(writer, sheet_name=safe_sheet_name(tag), index=False)
             print(f"\n汇总 Excel : {xlsx_path}")
             big = pd.concat(frames.values(), ignore_index=True, sort=False)
-            big.to_csv(big_csv, index=False, encoding="utf-8-sig")
+            write_metastock_csv(big, big_csv)
             print(f"汇总 CSV  : {big_csv}  ({len(big)} 行)")
 
     print(f"\n完成: 成功 {len(success)} / 失败 {len(failed)}")
