@@ -19,7 +19,245 @@ from collections import defaultdict
 
 import pandas as pd
 
-from pattern_report import tick_of, analyze, IMG_BARS, fmt, load_metastock_csv
+from get_price import VARIETIES, load_metastock_df
+
+IMG_BARS = 60
+
+TICK_MAP = {
+    "RB": 1, "HC": 1, "I": 0.5, "J": 0.5, "JM": 0.5,
+    "MA": 1, "TA": 2, "PP": 1, "V": 5, "EG": 1,
+    "SA": 1, "FG": 1, "L": 5, "BU": 1, "RU": 5,
+    "FU": 1, "SC": 0.1, "LU": 1, "SP": 1, "UR": 1,
+    "SH": 1, "EB": 1, "PF": 2, "PX": 2, "PR": 2, "BR": 5,
+    "CU": 10, "AL": 5, "ZN": 5, "NI": 10, "PB": 5,
+    "SN": 10, "AU": 0.02, "AG": 1, "SI": 5, "LC": 50, "AO": 1, "PS": 5,
+    "C": 1, "CS": 1, "M": 1, "Y": 2, "P": 2,
+    "A": 1, "B": 1, "SR": 1, "CF": 5, "CY": 5,
+    "OI": 1, "RM": 1, "AP": 1, "CJ": 5, "JD": 1,
+    "PK": 2, "LH": 5,
+}
+
+
+def tick_of(code: str) -> float:
+    code = code.upper()
+    if code.endswith("0"):
+        code = code[:-1]
+    return TICK_MAP.get(code, 1.0)
+
+
+def fmt(price, tick=1):
+    if pd.isna(price):
+        return ""
+    p = float(price)
+    t = float(tick)
+    if t >= 1:
+        return f"{int(round(p))}"
+    decimals = max(0, -len(str(t).rstrip("0").split(".")[-1]) + 1)
+    decimals = max(decimals, len(str(t).rstrip("0").split(".")[-1]))
+    return f"{p:.{decimals}f}"
+
+
+# ---------- 形态检测辅助 ----------
+def _body(r):
+    return abs(r["收盘价"] - r["开盘价"])
+
+def _upper_shadow(r):
+    return r["最高价"] - max(r["收盘价"], r["开盘价"])
+
+def _lower_shadow(r):
+    return min(r["收盘价"], r["开盘价"]) - r["最低价"]
+
+def _range(r):
+    return r["最高价"] - r["最低价"]
+
+def _is_yang(r):
+    return r["收盘价"] > r["开盘价"]
+
+def _is_yin(r):
+    return r["收盘价"] < r["开盘价"]
+
+def _midpoint(r):
+    return (r["收盘价"] + r["开盘价"]) / 2
+
+def _atr(df, idx, period=14):
+    start = max(0, idx - period + 1)
+    trs = []
+    for i in range(start, idx + 1):
+        h = df.iloc[i]["最高价"]
+        l = df.iloc[i]["最低价"]
+        pc = df.iloc[i - 1]["收盘价"] if i > 0 else df.iloc[i]["开盘价"]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    return sum(trs) / len(trs) if trs else 0
+
+def _trend_up(df, idx, n=5):
+    if idx < n * 2:
+        return True
+    recent = df.iloc[idx - n + 1: idx + 1]["收盘价"].mean()
+    prev = df.iloc[idx - n * 2 + 1: idx - n + 1]["收盘价"].mean()
+    return recent > prev
+
+def _trend_down(df, idx, n=5):
+    if idx < n * 2:
+        return True
+    recent = df.iloc[idx - n + 1: idx + 1]["收盘价"].mean()
+    prev = df.iloc[idx - n * 2 + 1: idx - n + 1]["收盘价"].mean()
+    return recent < prev
+
+
+def _detect_patterns(df, idx):
+    """检测第 idx 根 K 线的全部形态"""
+    if idx < 1:
+        return []
+    r = df.iloc[idx]
+    k1 = df.iloc[idx - 1] if idx >= 1 else None
+    k2 = r
+    body = _body(r)
+    rng = _range(r)
+    ushadow = _upper_shadow(r)
+    lshadow = _lower_shadow(r)
+    atr = _atr(df, idx)
+    results = []
+
+    if rng == 0:
+        return []
+
+    # 锤子线 / 上吊线
+    if lshadow >= 2 * body and ushadow <= 0.3 * body and body <= 0.3 * rng:
+        if _trend_down(df, idx - 1):
+            results.append({"name": "锤子线", "direction": "多", "note": "下影≥2×实体, 下跌末端信号"})
+        elif _trend_up(df, idx - 1):
+            results.append({"name": "上吊线", "direction": "空", "note": "上影短小, 上涨末端预警"})
+
+    # 流星线 / 倒锤子线
+    if ushadow >= 2 * body and lshadow <= 0.3 * body and body <= 0.3 * rng:
+        if _trend_up(df, idx - 1):
+            results.append({"name": "流星线", "direction": "空", "note": f"上影{ushadow:.1f}≥2×实体"})
+        elif _trend_down(df, idx - 1):
+            results.append({"name": "倒锤子线", "direction": "多", "note": "下跌末端, 长上影"})
+
+    # 十字星
+    if body <= 0.05 * rng:
+        sub = ""
+        if ushadow > 2 * lshadow and ushadow > 0.3 * rng:
+            sub = "墓碑十字"
+        elif lshadow > 2 * ushadow and lshadow > 0.3 * rng:
+            sub = "蜻蜓十字"
+        elif ushadow > 0.3 * rng and lshadow > 0.3 * rng:
+            sub = "长腿十字"
+        else:
+            sub = "十字"
+        results.append({"name": f"十字星({sub})" if sub != "十字" else "十字星",
+                        "direction": "中性", "note": "需次根K线确认方向"})
+
+    # 大阳线 / 大阴线
+    if body >= 0.7 * rng and rng >= 1.3 * atr:
+        if _is_yang(r):
+            results.append({"name": "大阳线", "direction": "多", "note": f"实体占区间{int(body/rng*100)}%, 区间≥1.3×ATR"})
+        else:
+            results.append({"name": "大阴线", "direction": "空", "note": f"实体占区间{int(body/rng*100)}%, 区间≥1.3×ATR"})
+
+    # 纺锤线
+    if body <= 0.3 * rng and lshadow >= body and ushadow >= body:
+        results.append({"name": "纺锤线", "direction": "中性", "note": "多空分歧, 震荡预警"})
+
+    # --- 双根形态 ---
+    if k1 is not None:
+        b1 = _body(k1)
+        r1 = _range(k1)
+        # 看涨吞没
+        if _is_yin(k1) and _is_yang(k2) and k2["开盘价"] < k1["收盘价"] and k2["收盘价"] > k1["开盘价"]:
+            b2 = _body(k2)
+            if b2 > b1:
+                results.append({"name": "看涨吞没", "direction": "多", "note": "K2阳实体包裹K1阴实体"})
+        # 看跌吞没
+        if _is_yang(k1) and _is_yin(k2) and k2["开盘价"] > k1["收盘价"] and k2["收盘价"] < k1["开盘价"]:
+            b2 = _body(k2)
+            if b2 > b1:
+                results.append({"name": "看跌吞没", "direction": "空", "note": "K2阴实体包裹K1阳实体"})
+        # 刺透形态
+        if _is_yin(k1) and _is_yang(k2) and k2["开盘价"] < k1["最低价"] and k2["收盘价"] > _midpoint(k1) and k2["收盘价"] < k1["收盘价"]:
+            results.append({"name": "刺透形态", "direction": "多", "note": "K1大阴, K2低开创新低, 收盘过K1实体中线"})
+        # 乌云盖顶
+        if _is_yang(k1) and _is_yin(k2) and k2["开盘价"] > k1["最高价"] and k2["收盘价"] < _midpoint(k1) and k2["收盘价"] > k1["开盘价"]:
+            results.append({"name": "乌云盖顶", "direction": "空", "note": "K1大阳, K2高开创高, 收盘跌破K1实体中线"})
+        # 孕线
+        if (k2["开盘价"] >= k1["开盘价"] and k2["收盘价"] <= k1["收盘价"]
+                or k2["开盘价"] <= k1["开盘价"] and k2["收盘价"] >= k1["收盘价"]):
+            inner_o = min(k2["开盘价"], k2["收盘价"])
+            inner_c = max(k2["开盘价"], k2["收盘价"])
+            outer_o = min(k1["开盘价"], k1["收盘价"])
+            outer_c = max(k1["开盘价"], k1["收盘价"])
+            if inner_o > outer_o and inner_c < outer_c:
+                b2 = _body(k2)
+                if _is_yang(k1) and _is_yin(k2):
+                    if b2 <= 0.05 * r1:
+                        results.append({"name": "看跌孕十字", "direction": "空", "note": "K1长阳+K2十字嵌套, 多头乏力"})
+                    else:
+                        results.append({"name": "看跌孕线", "direction": "空", "note": "K1长阳+K2小实体嵌套, 多头乏力"})
+                elif _is_yin(k1) and _is_yang(k2):
+                    if b2 <= 0.05 * r1:
+                        results.append({"name": "看涨孕十字", "direction": "多", "note": "K1长阴+K2十字嵌套, 空头乏力"})
+                    else:
+                        results.append({"name": "看涨孕线", "direction": "多", "note": "K1长阴+K2小实体嵌套, 趋势衰竭"})
+        # 早晨之星
+        if idx >= 2:
+            k0 = df.iloc[idx - 2]
+            if (_is_yin(k0) and _body(k0) >= 0.7 * _range(k0) and _range(k0) >= 1.3 * atr
+                    and _body(k1) <= 0.3 * _range(k1) and k2["收盘价"] > _midpoint(k0) and _is_yang(k2)):
+                results.append({"name": "早晨之星", "direction": "多", "note": "下跌趋势+星线+阳线刺入"})
+        # 黄昏之星
+        if idx >= 2:
+            k0 = df.iloc[idx - 2]
+            if (_is_yang(k0) and _body(k0) >= 0.7 * _range(k0) and _range(k0) >= 1.3 * atr
+                    and _body(k1) <= 0.3 * _range(k1) and k2["收盘价"] < _midpoint(k0) and _is_yin(k2)):
+                results.append({"name": "黄昏之星", "direction": "空", "note": "上涨趋势+星线+阴线刺入"})
+
+    # --- 三根形态 ---
+    if idx >= 2:
+        k0 = df.iloc[idx - 2]
+        # 红三兵
+        if all(_is_yang(df.iloc[idx - j]) for j in range(3)):
+            if df.iloc[idx]["收盘价"] > df.iloc[idx - 1]["收盘价"] > k0["收盘价"] and all(_body(df.iloc[idx - j]) > 0 for j in range(3)):
+                results.append({"name": "红三兵", "direction": "多", "note": "三连阳, 收盘持续新高"})
+        # 三乌鸦
+        if all(_is_yin(df.iloc[idx - j]) for j in range(3)):
+            if df.iloc[idx]["收盘价"] < df.iloc[idx - 1]["收盘价"] < k0["收盘价"] and all(_body(df.iloc[idx - j]) > 0 for j in range(3)):
+                results.append({"name": "三乌鸦", "direction": "空", "note": "三连阴, 低点持续下移"})
+        # 上升三法
+        if _is_yang(k0) and _is_yang(k2) and all(_range(df.iloc[idx - j]) < _body(k0) for j in [1]) and k2["收盘价"] > k0["收盘价"]:
+            results.append({"name": "上升三法", "direction": "多", "note": "长阳+小回调+末根大阳创新高"})
+        # 下跌三法
+        if _is_yin(k0) and _is_yin(k2) and all(_range(df.iloc[idx - j]) < _body(k0) for j in [1]) and k2["收盘价"] < k0["收盘价"]:
+            results.append({"name": "下跌三法", "direction": "空", "note": "长阴+小反弹+末根大阴创新低"})
+
+    # --- 跳空缺口 ---
+    if k1 is not None:
+        if k2["最低价"] > k1["最高价"]:
+            results.append({"name": "向上跳空缺口", "direction": "多", "note": f"支撑窗口 [{k1['最高价']}, {k2['最低价']}]"})
+        if k2["最高价"] < k1["最低价"]:
+            results.append({"name": "向下跳空缺口", "direction": "空", "note": f"压力窗口 [{k2['最高价']}, {k1['最低价']}]"})
+
+    # --- 岛形反转 ---
+    if idx >= 2:
+        k0 = df.iloc[idx - 2]
+        if k1["最低价"] > k0["最高价"] and k2["最高价"] < k1["最低价"]:
+            results.append({"name": "岛形反转", "direction": "空", "note": "双向跳空, 顶部孤岛"})
+        elif k1["最高价"] < k0["最低价"] and k2["最低价"] > k1["最高价"]:
+            results.append({"name": "岛形反转", "direction": "多", "note": "双向跳空, 底部孤岛"})
+
+    return results
+
+
+def analyze(df):
+    """扫描全部 K 线, 返回 (matches, last_idx)。
+    matches: [{name, direction, note, idx}]"""
+    matches = []
+    for i in range(1, len(df)):
+        hits = _detect_patterns(df, i)
+        for h in hits:
+            h["idx"] = i
+            matches.append(h)
+    return matches, len(df) - 1
 
 # ---------- 输出目录(与 get_price 的 output/ 分开) ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -104,7 +342,7 @@ def main():
     if not os.path.exists(path):
         sys.exit(f"文件不存在: {path}")
 
-    df = load_metastock_csv(path)
+    df = load_metastock_df(path)
 
     out_dir = os.path.join(PATTERN_OUTPUT_DIR, "fullscan")
     os.makedirs(out_dir, exist_ok=True)
@@ -139,6 +377,8 @@ def main():
         close = float(grp.iloc[-1]["收盘价"])
 
         matches, idx = analyze(grp)
+        last_idx = len(grp) - 1
+        matches = [m for m in matches if m["idx"] == last_idx]
         dmatches = [m for m in matches if m["direction"] in ("多", "空")]
 
         if matches:
