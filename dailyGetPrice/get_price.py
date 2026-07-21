@@ -5,14 +5,16 @@
 数据源  : akshare -> 新浪财经 (https://qhsz.huotaobi.cn / 新浪期货行情)
 接口    : ak.futures_main_sina(symbol="<合约代码>")
 例子    : RB2609 = 螺纹钢 2026年09月合约
-说明    : 不再使用连续主力合约，而是抓取当前最活跃的单一期货主力合约月份。
-          对每个品种会自动选择最新成交量/持仓量最大的合约月份，例如豆一会选2609，沪金会选2608。
+说明    : 对每个品种自动选择持仓量最大的主力合约月份(如 RB→RB2609)。
+          CSV 文件名用合约代码(如 RB2609.csv), 换月时自动切换到新文件并合并旧历史。
+          日常运行只追加新日期(1次API调用/品种), 换月/首次才全量抓取。
 列字段  : 品种代码 / D(市场) / 日期(YYYYMMDD) / 开盘价 / 最高价 / 最低价 / 收盘价 / 成交量
 
 输出 (运行后在同目录 output/ 下):
-  1) 每个品种一个 CSV   : <代码>.csv  (MetaStock ASCII 8列, 无表头)
+  1) 每个品种一个 CSV   : <合约代码>.csv  (如 RB2609.csv, MetaStock ASCII 8列, 无表头)
   2) 汇总 CSV           : futures_main_daily_<日期>.csv (8列, 无表头)
   3) 汇总 Excel (多sheet): futures_main_daily_<日期>.xlsx  (需加 --excel)
+  4) 合约映射           : contracts.json  (品种代码→当前合约代码, 用于增量追加)
 
 用法:
   python get_price.py            # 抓取全部品种(默认只输出CSV)
@@ -423,11 +425,16 @@ def main():
 
     for idx, (code, name) in enumerate(target, 1):
         tag = f"{code} {name}"
-        csv_path = os.path.join(OUTPUT_DIR, f"{code}.csv")
+        # 用合约代码作文件名(如 RB2609.csv); 有 meta 则用旧合约, 否则后面全量抓时再定
+        old_contract = meta.get(code)
+        if old_contract:
+            csv_path = os.path.join(OUTPUT_DIR, f"{old_contract}.csv")
+        else:
+            csv_path = None
         print(f"[{idx}/{len(target)}] {tag} 抓取中...", end=" ", flush=True)
 
-        # 已有 CSV 且已是今天日期 → 跳过
-        csv_latest = check_latest_date(csv_path)
+        # 已有 CSV 且已是今天日期 → 跳过(仅当有 meta 时)
+        csv_latest = check_latest_date(csv_path) if csv_path else None
         if csv_latest is not None and csv_latest >= today_str:
             old_df = load_metastock_df(csv_path)
             if old_df is not None:
@@ -440,54 +447,48 @@ def main():
         try:
             # ========== 增量追加: 合约未换月时只抓新日期的数据 ==========
             incremental_ok = False
-            if csv_latest is not None:
-                old_contract = meta.get(code)
-                if old_contract:
-                    # 计算增量起始日期(csv_latest的次日)
-                    last_dt = datetime.datetime.strptime(csv_latest, "%Y-%m-%d").date()
-                    next_dt = last_dt + datetime.timedelta(days=1)
-                    start_inc = next_dt.strftime("%Y%m%d")
-                    try:
-                        inc_df = fetch_main_daily(old_contract, start_date=start_inc)
-                    except Exception:
-                        inc_df = None
+            if csv_latest is not None and old_contract and csv_path:
+                next_dt = datetime.datetime.strptime(csv_latest, "%Y-%m-%d").date() + datetime.timedelta(days=1)
+                start_inc = next_dt.strftime("%Y%m%d")
+                try:
+                    inc_df = fetch_main_daily(old_contract, start_date=start_inc)
+                except Exception:
+                    inc_df = None
 
-                    if inc_df is not None and len(inc_df) > 0:
-                        # 检查最后一行的持仓量, 判断合约是否还有活力
-                        last_oi = pd.to_numeric(inc_df.iloc[-1].get("持仓量", 0), errors="coerce")
-                        if pd.isna(last_oi):
-                            last_oi = 0
-                        if last_oi > 0:
-                            # 合约仍有持仓 → 增量追加
-                            inc_df = inc_df.copy()
-                            if "日期" in inc_df.columns:
-                                inc_df["日期"] = pd.to_datetime(inc_df["日期"]).dt.strftime("%Y-%m-%d")
-                            if "动态结算价" in inc_df.columns:
-                                inc_df = inc_df.drop(columns=["动态结算价"])
-                            inc_df.insert(0, "合约代码", old_contract)
-                            inc_df.insert(0, "品种代码", code)
-                            inc_df.insert(1, "品种名称", name)
+                if inc_df is not None and len(inc_df) > 0:
+                    last_oi = pd.to_numeric(inc_df.iloc[-1].get("持仓量", 0), errors="coerce")
+                    if pd.isna(last_oi):
+                        last_oi = 0
+                    if last_oi > 0:
+                        inc_df = inc_df.copy()
+                        if "日期" in inc_df.columns:
+                            inc_df["日期"] = pd.to_datetime(inc_df["日期"]).dt.strftime("%Y-%m-%d")
+                        if "动态结算价" in inc_df.columns:
+                            inc_df = inc_df.drop(columns=["动态结算价"])
+                        inc_df.insert(0, "合约代码", old_contract)
+                        inc_df.insert(0, "品种代码", code)
+                        inc_df.insert(1, "品种名称", name)
 
-                            old_df = load_metastock_df(csv_path)
-                            if old_df is not None and len(old_df) > 0:
-                                combined = pd.concat([old_df, inc_df], ignore_index=True, sort=False)
-                                combined = combined.drop_duplicates(subset=["日期"], keep="last")
-                                combined = combined.sort_values(["日期"], kind="mergesort").reset_index(drop=True)
-                            else:
-                                combined = inc_df
+                        old_df = load_metastock_df(csv_path)
+                        if old_df is not None and len(old_df) > 0:
+                            combined = pd.concat([old_df, inc_df], ignore_index=True, sort=False)
+                            combined = combined.drop_duplicates(subset=["日期"], keep="last")
+                            combined = combined.sort_values(["日期"], kind="mergesort").reset_index(drop=True)
+                        else:
+                            combined = inc_df
 
-                            write_metastock_csv(combined, csv_path)
-                            n_new = len(inc_df)
-                            print(f"INC  {n_new} 行追加  {csv_latest}→{combined['日期'].iloc[-1]}  合约 {old_contract}")
-                            frames[tag] = combined
-                            meta[code] = old_contract
-                            success.append(tag)
-                            consec_fail = 0
-                            incremental_ok = True
+                        write_metastock_csv(combined, csv_path)
+                        print(f"INC  {len(inc_df)} 行追加  {csv_latest}→{combined['日期'].iloc[-1]}  合约 {old_contract}")
+                        frames[tag] = combined
+                        meta[code] = old_contract
+                        success.append(tag)
+                        consec_fail = 0
+                        incremental_ok = True
 
             # ========== 全量抓取: 首次/换月/增量失败时 ==========
             if not incremental_ok:
                 contract_codes = build_contract_codes(code)
+                csv_path = os.path.join(OUTPUT_DIR, f"{contract_codes[0]}.csv")
                 pieces = []
                 for contract_code in contract_codes:
                     df = fetch_main_daily(contract_code)
@@ -508,19 +509,20 @@ def main():
 
                 combined = pd.concat(pieces, ignore_index=True, sort=False)
                 combined = combined.sort_values(["日期", "合约代码"], kind="mergesort").reset_index(drop=True)
-                # 与旧CSV合并(备用源只回近180天, 合并保留旧历史)
-                old = load_metastock_df(csv_path)
-                if old is not None and len(old) > 0:
-                    combined = pd.concat([old, combined], ignore_index=True, sort=False)
-                    combined = combined.drop_duplicates(subset=["日期"], keep="last")
-                    combined = combined.sort_values(["日期"], kind="mergesort").reset_index(drop=True)
+                # 与旧CSV合并(换月时旧文件名不同, 从 meta 找旧路径)
+                old_csv_path = os.path.join(OUTPUT_DIR, f"{old_contract}.csv") if old_contract else None
+                if old_csv_path and os.path.exists(old_csv_path):
+                    old = load_metastock_df(old_csv_path)
+                    if old is not None and len(old) > 0:
+                        combined = pd.concat([old, combined], ignore_index=True, sort=False)
+                        combined = combined.drop_duplicates(subset=["日期"], keep="last")
+                        combined = combined.sort_values(["日期"], kind="mergesort").reset_index(drop=True)
 
                 write_metastock_csv(combined, csv_path)
-                actual_contract = contract_codes[0]
-                print(f"FULL {len(combined)} 行  日期 {combined['日期'].iloc[0]}~{combined['日期'].iloc[-1]}  合约 {', '.join(contract_codes)} -> {os.path.basename(csv_path)}")
+                print(f"FULL {len(combined)} 行  {combined['日期'].iloc[0]}~{combined['日期'].iloc[-1]}  合约 {contract_codes[0]} -> {os.path.basename(csv_path)}")
 
                 frames[tag] = combined
-                meta[code] = actual_contract
+                meta[code] = contract_codes[0]
                 success.append(tag)
                 consec_fail = 0
 
