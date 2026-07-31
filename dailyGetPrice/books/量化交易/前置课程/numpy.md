@@ -5,6 +5,7 @@ NumPy 通常与 SciPy（Scientific Python）和 Matplotlib（绘图库）一起�
 ndarray 对象是用于存放同类型元素的多维数组
 ``` python
 import numpy as np 
-a = np.array([1,2,3])  
-print (a)
+a = np.array([1,2,3])
+b = np.array([[1,  2],  [3,  4]]) 
+
 ```

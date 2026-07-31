@@ -273,9 +273,9 @@ def _plot_price_chart(bars, trades, cfg, out_png, title):
                         fontsize=6, fontweight="bold", color="#d32f2f",
                         ha="center", va="top",
                         bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="#d32f2f", alpha=0.8))
-            ax.scatter([xi], [x_low], marker="v", color="#d32f2f",
+            ax.scatter([xi], [x_high], marker="v", color="#d32f2f",
                        s=80, zorder=5, edgecolors="black", linewidths=0.8)
-            ax.annotate(f"平{idx_t} {t.exit_date}", (xi, x_low),
+            ax.annotate(f"平{idx_t} {t.exit_date}", (xi, x_high),
                         textcoords="offset points", xytext=(0, 14),
                         fontsize=6, fontweight="bold", color="#d32f2f",
                         ha="center", va="bottom",
@@ -288,9 +288,9 @@ def _plot_price_chart(bars, trades, cfg, out_png, title):
                         fontsize=6, fontweight="bold", color="#2e7d32",
                         ha="center", va="bottom",
                         bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="#2e7d32", alpha=0.8))
-            ax.scatter([xi], [x_high], marker="^", color="#2e7d32",
+            ax.scatter([xi], [x_low], marker="^", color="#2e7d32",
                        s=80, zorder=5, edgecolors="black", linewidths=0.8)
-            ax.annotate(f"平{idx_t} {t.exit_date}", (xi, x_high),
+            ax.annotate(f"平{idx_t} {t.exit_date}", (xi, x_low),
                         textcoords="offset points", xytext=(0, -14),
                         fontsize=6, fontweight="bold", color="#2e7d32",
                         ha="center", va="top",
