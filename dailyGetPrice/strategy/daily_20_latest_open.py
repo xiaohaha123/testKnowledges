@@ -94,13 +94,11 @@ def run_latest_open(master_csv_path: str, output_dir: str = None):
     lines.append(f"- 生成时间: {now}")
     lines.append("")
 
-    lines.append("| 品种 | 名称 | 方向 | 状态 | 开仓日期 | 开仓价 | 开仓依据 | 当前10日出场通道 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
-
     holding_profit = []
     holding_loss = []
     closed = []
     no_trade = []
+    all_dates = set()
 
     for code in sorted_codes:
         variety = code.rstrip("0123456789") or code
@@ -108,6 +106,9 @@ def run_latest_open(master_csv_path: str, output_dir: str = None):
         bars = load_variety_bars_from_master(master_csv_path, code)
         if not bars:
             continue
+
+        for b in bars:
+            all_dates.add(b.date)
 
         cfg = Config()
         cfg.tick_size = TICK_MAP.get(variety, 1)
@@ -182,6 +183,32 @@ def run_latest_open(master_csv_path: str, output_dir: str = None):
     lines.append(f"- 无交易: {len(no_trade)} 个品种")
     lines.append("")
 
+    last5_dates = sorted(all_dates)[-5:]
+    recent_rows = []
+    for r in holding_profit + holding_loss:
+        if r[3] in last5_dates:
+            recent_rows.append(r)
+    if recent_rows:
+        lines.append("## 最近5个交易日开仓汇总")
+        lines.append("")
+        lines.append(f"最近5个交易日: {', '.join(last5_dates)}")
+        lines.append("")
+        lines.append("| 品种 | 名称 | 方向 | 开仓日期 | 开仓价 | 当前价 | 浮盈亏 | 开仓依据 | 当前10日出场通道 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        total_float = 0.0
+        for r in recent_rows:
+            pnl_val = float(r[6].replace(",", ""))
+            total_float += pnl_val
+            lines.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} | {r[5]} | {r[6]} | {r[7]} | {r[8]} |")
+        lines.append("")
+        lines.append(f"| | | | | | **合计** | **{total_float:,.2f}** | | |")
+        lines.append("")
+    else:
+        lines.append("## 最近5个交易日开仓汇总")
+        lines.append("")
+        lines.append("最近5个交易日无新开仓品种")
+        lines.append("")
+
     out_path = os.path.join(output_dir, "latest_open.md")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -190,6 +217,8 @@ def run_latest_open(master_csv_path: str, output_dir: str = None):
     print(f"亏损持仓: {len(holding_loss)} 个品种")
     print(f"已平仓: {len(closed)} 个品种")
     print(f"无交易: {len(no_trade)} 个品种")
+    if recent_rows:
+        print(f"最近5个交易日开仓: {len(recent_rows)} 个品种")
     print(f"报告: {out_path}")
 
 
