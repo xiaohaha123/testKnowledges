@@ -2,13 +2,13 @@
 """
 最新K线形态扫描(多品种批量, 单文件输出)
 ========================================
-读取 get_price.py 输出的**汇总 CSV**(8列 MetaStock ASCII, 含全部品种), 对每个品种
+读取 get_price_futures.py 输出的**汇总 CSV**(8列 MetaStock ASCII, 含全部品种), 对每个品种
 仅扫描**最新一根K线**完成的形态(对照 summary.md), 列出全部命中
 形态(多/空/中性)。
 输出: 1 份 fullscan_index.md(含全部品种汇总表 + 命中品种详情+图表)。
 无命中品种不生成图表。
 图例: 多标于当日低点下方(^红), 空标于当日高点上方(v绿), 中性标低点下方(o灰)。
-用法: python pattern_fullscan.py output/futures_main_daily_20260708.csv
+用法: python pattern_fullscan_futures.py output_futures/futures_main_daily_20260708.csv
 (8列 MetaStock ASCII 格式, 无表头)
 """
 
@@ -19,7 +19,10 @@ from collections import defaultdict
 
 import pandas as pd
 
-from get_price import VARIETIES, load_metastock_df
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
+
+from strategy_futures.get_price_futures import VARIETIES, load_metastock_df
 
 IMG_BARS = 60
 
@@ -249,19 +252,19 @@ def _detect_patterns(df, idx):
 
 
 def analyze(df):
-    """扫描全部 K 线, 返回 (matches, last_idx)。
+    """仅扫描最后一根 K 线的形态, 返回 (matches, last_idx)。
     matches: [{name, direction, note, idx}]"""
-    matches = []
-    for i in range(1, len(df)):
-        hits = _detect_patterns(df, i)
-        for h in hits:
-            h["idx"] = i
-            matches.append(h)
-    return matches, len(df) - 1
+    last_idx = len(df) - 1
+    if last_idx < 1:
+        return [], last_idx
+    hits = _detect_patterns(df, last_idx)
+    for h in hits:
+        h["idx"] = last_idx
+    return hits, last_idx
 
 # ---------- 输出目录(与 get_price 的 output/ 分开) ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PATTERN_OUTPUT_DIR = os.path.join(BASE_DIR, "pattern_output")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PATTERN_OUTPUT_DIR = os.path.join(BASE_DIR, "strategy_futures_output")
 
 
 def bar_of(df, i):
@@ -335,7 +338,7 @@ def plot_fullscan(df, hits, out_png, title, tick):
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("用法: python pattern_fullscan.py <汇总CSV>")
+        sys.exit("用法: python pattern_fullscan_futures.py <汇总CSV>")
     path = sys.argv[1]
     if not os.path.isabs(path):
         path = os.path.abspath(path)
@@ -345,7 +348,8 @@ def main():
     df = load_metastock_df(path)
 
     out_dir = os.path.join(PATTERN_OUTPUT_DIR, "fullscan")
-    os.makedirs(out_dir, exist_ok=True)
+    img_dir = os.path.join(out_dir, "fullscan_img")
+    os.makedirs(img_dir, exist_ok=True)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     lines = []
@@ -358,27 +362,25 @@ def main():
     lines.append("")
     lines.append("## 汇总")
     lines.append("")
-    lines.append("| 品种 | 名称 | 合约 | 最新日期 | 收盘 | 方向 | 命中形态 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| 品种 | 名称 | 最新日期 | 收盘 | 方向 | 命中形态 |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
 
     detail = []
-    n_var = df["品种代码"].nunique()
+    n_var = df["合约代码"].nunique()
     var_done = 0
     n_hit = 0
-    for code, grp in df.groupby("品种代码", sort=False):
+    for code, grp in df.groupby("合约代码", sort=False):
         grp = grp.sort_values("日期").reset_index(drop=True)
         if len(grp) == 0:
             continue
         name = grp.iloc[0]["品种名称"]
-        contract = grp.iloc[0]["合约代码"]
-        tick = tick_of(code)
+        variety_code = grp.iloc[0]["品种代码"]
+        tick = tick_of(variety_code)
         n = len(grp)
         latest = str(grp["日期"].iloc[-1])
         close = float(grp.iloc[-1]["收盘价"])
 
         matches, idx = analyze(grp)
-        last_idx = len(grp) - 1
-        matches = [m for m in matches if m["idx"] == last_idx]
         dmatches = [m for m in matches if m["direction"] in ("多", "空")]
 
         if matches:
@@ -393,8 +395,8 @@ def main():
             n_hit += 1
 
             base = f"{code}_{name}"
-            out_png = os.path.join(out_dir, f"fullscan_{base}.png")
-            title = f"{code} {name} {contract}  {latest}  {all_names}"
+            out_png = os.path.join(img_dir, f"fullscan_{base}.png")
+            title = f"{code} {name}  {latest}  {all_names}"
             try:
                 plot_fullscan(grp, hits, out_png, title, tick)
                 has_img = True
@@ -403,16 +405,16 @@ def main():
                 has_img = False
 
             dir_disp = f"**{bias}**" if bias != "中性" else "中性"
-            lines.append(f"| {code} | {name} | {contract} | {latest} | "
+            lines.append(f"| {code} | {name} | {latest} | "
                          f"{fmt(close, tick)} | {dir_disp} | {all_names} |")
 
-            detail.append(f"### {code} {name}（{contract}）")
+            detail.append(f"### {code} {name}")
             detail.append("")
             detail.append(f"- 最新日期: {latest}　收盘: {fmt(close, tick)}　"
                           f"主方向: **{bias}**")
             detail.append("")
             if has_img:
-                detail.append(f"![{code} {name}]({os.path.basename(out_png)})")
+                detail.append(f"![{code} {name}](fullscan_img/{os.path.basename(out_png)})")
                 detail.append("")
             detail.append("| 形态 | 方向 | 说明 |")
             detail.append("| --- | --- | --- |")
@@ -420,7 +422,7 @@ def main():
                 detail.append(f"| {m['name']} | {m['direction']} | {m['note']} |")
             detail.append("")
         else:
-            lines.append(f"| {code} | {name} | {contract} | {latest} | "
+            lines.append(f"| {code} | {name} | {latest} | "
                          f"{fmt(close, tick)} | — | — |")
 
         var_done += 1

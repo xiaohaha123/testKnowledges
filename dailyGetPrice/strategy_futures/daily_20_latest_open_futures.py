@@ -2,12 +2,136 @@
 import os
 import sys
 import datetime
+from dataclasses import dataclass, field
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-from get_price import VARIETIES
-from strategy.daily_20_backtest import Bar, Config, BacktestEngine, fmt_price
+from strategy_futures.get_price_futures import VARIETIES, _chinese_to_contract
+
+
+@dataclass
+class Bar:
+    date: str
+    o: float = 0.0
+    h: float = 0.0
+    l: float = 0.0
+    c: float = 0.0
+    v: float = 0.0
+
+    def __post_init__(self):
+        self.o = float(self.o) if self.o else 0.0
+        self.h = float(self.h) if self.h else 0.0
+        self.l = float(self.l) if self.l else 0.0
+        self.c = float(self.c) if self.c else 0.0
+        self.v = float(self.v) if self.v else 0.0
+
+    @property
+    def open(self):
+        return self.o
+
+    @property
+    def high(self):
+        return self.h
+
+    @property
+    def low(self):
+        return self.l
+
+    @property
+    def close(self):
+        return self.c
+
+    @property
+    def volume(self):
+        return self.v
+
+
+@dataclass
+class Config:
+    entry_breakout: int = 20
+    exit_breakout: int = 10
+    tick_size: float = 1.0
+    contract_multiplier: int = 10
+
+
+@dataclass
+class Trade:
+    direction: str
+    entry_date: str
+    entry_price: float
+    breakout_high: float = 0.0
+    breakout_high_date: str = ""
+    breakout_low: float = 0.0
+    breakout_low_date: str = ""
+    reason: str = ""
+
+
+def fmt_price(value, tick):
+    if tick >= 1:
+        return f"{value:.0f}"
+    digits = len(f"{tick}".rstrip("0").split(".")[-1]) if "." in f"{tick}" else 0
+    return f"{value:.{digits}f}"
+
+
+class BacktestEngine:
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+
+    def run(self, bars: list[Bar]) -> list[Trade]:
+        if len(bars) < self.cfg.entry_breakout + 1:
+            return []
+
+        trades = []
+        position = None
+
+        for i in range(self.cfg.entry_breakout, len(bars)):
+            bar = bars[i]
+            prev_bars = bars[i - self.cfg.entry_breakout : i]
+            high_n = max(b.high for b in prev_bars)
+            low_n = min(b.low for b in prev_bars)
+            high_n_date = next(b.date for b in prev_bars if b.high == high_n)
+            low_n_date = next(b.date for b in prev_bars if b.low == low_n)
+
+            if position is None:
+                if bar.high > high_n:
+                    entry_price = high_n + self.cfg.tick_size
+                    position = Trade(
+                        direction="long",
+                        entry_date=bar.date,
+                        entry_price=entry_price,
+                        breakout_high=high_n,
+                        breakout_high_date=high_n_date,
+                    )
+                elif bar.low < low_n:
+                    entry_price = low_n - self.cfg.tick_size
+                    position = Trade(
+                        direction="short",
+                        entry_date=bar.date,
+                        entry_price=entry_price,
+                        breakout_low=low_n,
+                        breakout_low_date=low_n_date,
+                    )
+            else:
+                exit_bars = bars[max(i - self.cfg.exit_breakout, 0) : i]
+                if len(exit_bars) >= self.cfg.exit_breakout:
+                    exit_low = min(b.low for b in exit_bars)
+                    exit_high = max(b.high for b in exit_bars)
+
+                    if position.direction == "long" and bar.low < exit_low:
+                        position.reason = "exit_breakout"
+                        trades.append(position)
+                        position = None
+                    elif position.direction == "short" and bar.high > exit_high:
+                        position.reason = "exit_breakout"
+                        trades.append(position)
+                        position = None
+
+        if position is not None:
+            position.reason = "end_of_data"
+            trades.append(position)
+
+        return trades
 
 
 def load_variety_bars_from_master(master_path: str, variety_code: str) -> list[Bar]:
@@ -72,7 +196,7 @@ def run_latest_open(master_csv_path: str, output_dir: str = None):
         return
 
     if output_dir is None:
-        output_dir = os.path.join(BASE_DIR, "strategy_output")
+        output_dir = os.path.join(BASE_DIR, "strategy_futures_output", "latest_open")
     os.makedirs(output_dir, exist_ok=True)
 
     name_dict = dict(VARIETIES)
@@ -101,8 +225,9 @@ def run_latest_open(master_csv_path: str, output_dir: str = None):
     all_dates = set()
 
     for code in sorted_codes:
-        variety = code.rstrip("0123456789") or code
-        vname = name_dict.get(code, name_dict.get(variety + "0", code))
+        eng_code = _chinese_to_contract(code)
+        variety = eng_code.rstrip("0123456789") or eng_code
+        vname = name_dict.get(eng_code, name_dict.get(variety + "0", code))
         bars = load_variety_bars_from_master(master_csv_path, code)
         if not bars:
             continue
@@ -224,8 +349,8 @@ def run_latest_open(master_csv_path: str, output_dir: str = None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python daily_20_latest_open.py <汇总CSV文件路径> [输出目录]")
-        print("示例: python daily_20_latest_open.py output/futures_main_daily_20260730.csv")
+        print("用法: python daily_20_latest_open_futures.py <汇总CSV文件路径> [输出目录]")
+        print("示例: python daily_20_latest_open_futures.py output_futures/futures_main_daily_20260730.csv")
         sys.exit(1)
 
     csv_path = sys.argv[1]
