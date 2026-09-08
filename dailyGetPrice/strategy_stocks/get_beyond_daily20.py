@@ -15,12 +15,15 @@ import os
 import sys
 import datetime
 import time
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import akshare as ak
 except ImportError as e:
     sys.exit(f"缺少依赖: {e.name}\n请运行: pip install akshare")
+
+socket.setdefaulttimeout(15)
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,9 +54,26 @@ def _fetch_stock_daily(code: str, start_date: str, end_date: str):
     return None
 
 
+EARLY_DAYS = 10
+LIMIT_UP_CHG = 9.5
+LIMIT_UP_LOOKBACK = 30
+
+
+def _has_recent_limit_up(df, lookback=LIMIT_UP_LOOKBACK, threshold=LIMIT_UP_CHG):
+    """最近 lookback 个交易日(不含今日)是否出现过涨停"""
+    if len(df) < 2:
+        return False
+    prev_close = df["close"].shift(1)
+    chg = (df["close"] - prev_close) / prev_close * 100
+    end = len(df) - 1
+    start = max(0, end - lookback)
+    return bool((chg.iloc[start:end] >= threshold).any())
+
+
 def _check_one(code, name, start_date, end_date):
     df = _fetch_stock_daily(code, start_date, end_date)
-    if df is None or len(df) < 21:
+    need = max(21 + EARLY_DAYS, LIMIT_UP_LOOKBACK + 2)
+    if df is None or len(df) < need:
         return None
     df = df.sort_values("date").reset_index(drop=True)
     last = df.iloc[-1]
@@ -64,6 +84,16 @@ def _check_one(code, name, start_date, end_date):
     latest_date = str(last["date"])
     cur_chg = (cur_close - prev["close"]) / prev["close"] * 100
     if cur_close > high20 and cur_chg >= 2.0 and cur_close <= 30.0:
+        for k in range(1, EARLY_DAYS + 1):
+            idx = len(df) - 1 - k
+            if idx < 20:
+                break
+            day_close = df.iloc[idx]["close"]
+            day_high20 = df.iloc[idx - 20 : idx]["high"].max()
+            if day_close > day_high20:
+                return None
+        if not _has_recent_limit_up(df):
+            return None
         pct = (cur_close - high20) / high20 * 100
         return (code, name, latest_date, cur_close, high20, pct, cur_chg)
     return None
@@ -90,7 +120,7 @@ def run_beyond_daily20(cons_csv_path: str = None):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     today = datetime.date.today()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    start_date = (today - datetime.timedelta(days=40)).strftime("%Y%m%d")
+    start_date = (today - datetime.timedelta(days=40 + EARLY_DAYS * 2 + LIMIT_UP_LOOKBACK)).strftime("%Y%m%d")
     end_date = today.strftime("%Y%m%d")
 
     if cons_csv_path and os.path.exists(cons_csv_path):
@@ -108,6 +138,12 @@ def run_beyond_daily20(cons_csv_path: str = None):
         codes = [c for c in codes if c.startswith(("00", "60"))]
     total = len(codes)
     print(f"共 {total} 只成分股, {WORKERS}线程并发检查...\n")
+
+    try:
+        from py_mini_racer import MiniRacer
+        MiniRacer()
+    except Exception:
+        _fetch_stock_daily(codes[0], start_date, end_date)
 
     beyond = []
     done = 0

@@ -63,11 +63,24 @@ MIN_CHG_PCT = 2.0
 MAX_PRICE = 30.0
 MIN_ABOVE_PCT = 0.5
 VOL_RATIO = 1.5
+LIMIT_UP_CHG = 9.5
+LIMIT_UP_LOOKBACK = 30
+
+
+def _has_recent_limit_up(df, lookback=LIMIT_UP_LOOKBACK, threshold=LIMIT_UP_CHG):
+    """最近 lookback 个交易日(不含今日)是否出现过涨停"""
+    if len(df) < 2:
+        return False
+    prev_close = df["close"].shift(1)
+    chg = (df["close"] - prev_close) / prev_close * 100
+    end = len(df) - 1
+    start = max(0, end - lookback)
+    return bool((chg.iloc[start:end] >= threshold).any())
 
 
 def _check_buy(code, name, start_date, end_date, N, K1, K2):
     df = _fetch_stock_daily(code, start_date, end_date)
-    if df is None or len(df) < N + 1:
+    if df is None or len(df) < max(N + 1, LIMIT_UP_LOOKBACK + 2):
         return None
     df = df.sort_values("date").reset_index(drop=True)
 
@@ -106,6 +119,9 @@ def _check_buy(code, name, start_date, end_date, N, K1, K2):
     avg_vol = lookback["volume"].mean()
     vol_r = cur_vol / avg_vol if avg_vol > 0 else 0
     if vol_r < VOL_RATIO:
+        return None
+
+    if not _has_recent_limit_up(df):
         return None
 
     risk_pct = K2 * range_val / cur_close * 100
@@ -147,7 +163,7 @@ def run_dual_thrust(cons_csv_path: str = None, style: str = "均衡",
 
     today = datetime.date.today()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    start_date = (today - datetime.timedelta(days=60)).strftime("%Y%m%d")
+    start_date = (today - datetime.timedelta(days=60 + LIMIT_UP_LOOKBACK)).strftime("%Y%m%d")
     end_date = today.strftime("%Y%m%d")
 
     if cons_csv_path and os.path.exists(cons_csv_path):
@@ -166,6 +182,12 @@ def run_dual_thrust(cons_csv_path: str = None, style: str = "均衡",
     total = len(codes)
     print(f"共 {total} 只成分股, {WORKERS}线程并发检查...")
     print(f"参数: N={N}, K1={K1}, K2={K2} (风格: {style})\n")
+
+    try:
+        from py_mini_racer import MiniRacer
+        MiniRacer()
+    except Exception:
+        _fetch_stock_daily(codes[0], start_date, end_date)
 
     signals = []
     done = 0

@@ -534,17 +534,7 @@ def main():
         print(f"开始获取 {len(fetch_list)} 个品种日线数据...")
         for code, name in fetch_list:
             current_contract = contract_map.get(code, "")
-            csv_latest = info[code]["csv_latest"]
-            if code in inc_list and csv_latest:
-                try:
-                    last_dt = datetime.datetime.strptime(csv_latest, "%Y-%m-%d").date()
-                    start = (last_dt - datetime.timedelta(days=10)).strftime("%Y%m%d")
-                except Exception:
-                    start = None
-                end = today
-                raw = _fetch_contract_kline(current_contract, start_date=start, end_date=end)
-            else:
-                raw = _fetch_contract_kline(current_contract)
+            raw = _fetch_contract_kline(current_contract)
 
             if raw is not None and len(raw) > 0:
                 kline_data[code] = raw
@@ -575,7 +565,7 @@ def main():
         existing_csv = _find_existing_csv(current_contract)
         is_inc = (code, name) in inc_list
 
-        if code in skip_list:
+        if (code, name) in skip_list:
             continue
 
         if code not in kline_data:
