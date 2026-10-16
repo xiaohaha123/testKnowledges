@@ -610,7 +610,19 @@ def main():
                     combined = combined.drop_duplicates(subset=["日期"], keep="last")
                     combined = combined.sort_values(["日期"], kind="mergesort").reset_index(drop=True)
 
+            combined["合约代码"] = current_contract
+            combined["品种代码"] = code
+            combined["品种名称"] = name
+
             write_metastock_csv(combined, csv_path, code_column="合约代码")
+
+            if contract_changed and old_contract:
+                old_csv_path = _find_existing_csv(old_contract)
+                if old_csv_path != csv_path and os.path.exists(old_csv_path):
+                    try:
+                        os.remove(old_csv_path)
+                    except OSError:
+                        pass
 
             label = "换月FULL" if contract_changed else "FULL"
             print(f"[{idx}/{len(target)}] {tag}  {label} {len(combined)} 行  {combined['日期'].iloc[0]}~{combined['日期'].iloc[-1]}  合约 {current_contract}")
@@ -635,6 +647,7 @@ def main():
         existing_csv = _find_existing_csv(current_contract)
         old_df = load_metastock_df(existing_csv)
         if old_df is not None:
+            old_df["合约代码"] = current_contract
             frames[tag] = old_df
 
     if frames:

@@ -350,6 +350,9 @@ def main():
     out_dir = os.path.join(PATTERN_OUTPUT_DIR, "fullscan")
     img_dir = os.path.join(out_dir, "fullscan_img")
     os.makedirs(img_dir, exist_ok=True)
+    for f in os.listdir(img_dir):
+        if f.endswith(".png"):
+            os.remove(os.path.join(img_dir, f))
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     lines = []

@@ -15,7 +15,6 @@ import os
 import sys
 import datetime
 import time
-import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -23,7 +22,13 @@ try:
 except ImportError as e:
     sys.exit(f"缺少依赖: {e.name}\n请运行: pip install akshare")
 
-socket.setdefaulttimeout(15)
+import requests
+_orig_request = requests.Session.request
+def _patched_request(self, method, url, **kwargs):
+    if kwargs.get("timeout") is None:
+        kwargs["timeout"] = 15
+    return _orig_request(self, method, url, **kwargs)
+requests.Session.request = _patched_request
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
